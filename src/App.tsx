@@ -48,6 +48,8 @@ const DecisionMakerApp: React.FC = () => {
 
   const diceOptions = useMemo(
     () => [
+      { label: "D2", value: 2, key: "2" },
+      { label: "D3", value: 3, key: "3" },
       { label: "D4", value: 4, key: "4" },
       { label: "D6", value: 6, key: "6" },
       { label: "D8", value: 8, key: "8" },
