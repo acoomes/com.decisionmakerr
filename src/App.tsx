@@ -145,7 +145,7 @@ const DecisionMakerApp: React.FC = () => {
   useEffect(() => {
     const params = new URLSearchParams();
     filledChoices.forEach((c) => params.append("c", c.text.trim()));
-    if (filledChoices.length === 0 && plainSides !== 6) {
+    if (filledChoices.length < 2 && plainSides !== 6) {
       params.set("d", String(plainSides));
     }
     const query = params.toString();
@@ -155,6 +155,14 @@ const DecisionMakerApp: React.FC = () => {
       query ? `?${query}` : window.location.pathname
     );
   }, [filledChoices, plainSides]);
+
+  // Crossed-off choices only make sense while two or more are still in play.
+  // If an edit leaves fewer than that with no decision made, put them all back.
+  useEffect(() => {
+    if (choiceMode && !decided && !isRolling && activeChoices.length < 2) {
+      setChoices((prev) => prev.map((c) => ({ ...c, struck: false })));
+    }
+  }, [choiceMode, decided, isRolling, activeChoices.length]);
 
   const handleDieTypeChange = (key: string) => {
     setSelectedDieKey(key);
