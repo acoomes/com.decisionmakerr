@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Button,
   Select,
@@ -8,7 +8,6 @@ import {
   Typography,
   Space,
   Card,
-  Divider,
   message,
   Tooltip,
 } from "antd";
@@ -16,7 +15,13 @@ import {
   InfoCircleOutlined,
   ForkOutlined,
   CheckCircleOutlined,
-  AppstoreAddOutlined,
+  PlusOutlined,
+  CloseOutlined,
+  UndoOutlined,
+  LinkOutlined,
+  SmileOutlined,
+  FrownOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 import gsap from "gsap";
 import "./App.css";
@@ -34,73 +39,136 @@ const diceFaces: { [key: number]: string } = {
 };
 
 const MAX_CUSTOM_SIDES = 100;
+const MAX_CHOICES = 100;
+const MAX_CHOICE_LENGTH = 100;
+const MIN_CHOICE_ROWS = 2;
+const PRESET_SIDES = [2, 3, 4, 6, 8, 10, 12, 20];
+
+interface Choice {
+  id: number;
+  text: string;
+  struck: boolean;
+}
+
+interface RollResult {
+  roll: number;
+  choiceId?: number;
+}
+
+// "relieved": the user liked the roll. "last": every other option was struck.
+type Decided = "relieved" | "last" | null;
+
+let nextChoiceId = 1;
+const makeChoice = (text = ""): Choice => ({
+  id: nextChoiceId++,
+  text,
+  struck: false,
+});
+
+const faceFor = (value: number, sides: number): string | number =>
+  sides <= 6 && diceFaces[value] ? diceFaces[value] : value;
+
+const readUrlState = () => {
+  const params = new URLSearchParams(window.location.search);
+  const choices = params
+    .getAll("c")
+    .map((text) => text.trim().slice(0, MAX_CHOICE_LENGTH))
+    .filter((text) => text !== "")
+    .slice(0, MAX_CHOICES)
+    .map((text) => makeChoice(text));
+  while (choices.length < MIN_CHOICE_ROWS) choices.push(makeChoice());
+
+  const sidesParam = parseInt(params.get("d") || "", 10);
+  const sides =
+    sidesParam >= 2 && sidesParam <= MAX_CUSTOM_SIDES ? sidesParam : 6;
+
+  return { choices, sides };
+};
 
 const DecisionMakerApp: React.FC = () => {
-  const [selectedDieKey, setSelectedDieKey] = useState<string>("6");
-  const [customSidesInput, setCustomSidesInput] = useState<number>(6);
-  const [decisions, setDecisions] = useState<string[]>(Array(6).fill(""));
-  const [result, setResult] = useState<number | null>(null);
+  const initial = useMemo(readUrlState, []);
+
+  const [selectedDieKey, setSelectedDieKey] = useState<string>(
+    PRESET_SIDES.includes(initial.sides) ? String(initial.sides) : "custom"
+  );
+  const [customSidesInput, setCustomSidesInput] = useState<number>(
+    initial.sides
+  );
+  const [choices, setChoices] = useState<Choice[]>(initial.choices);
+  const [focusId, setFocusId] = useState<number | null>(null);
+  const [result, setResult] = useState<RollResult | null>(null);
+  const [decided, setDecided] = useState<Decided>(null);
   const [isRolling, setIsRolling] = useState<boolean>(false);
   const [infoVisible, setInfoVisible] = useState<boolean>(false);
   const [animatedDieVisual, setAnimatedDieVisual] = useState<string | number>(
     "?"
   );
+  const visualRef = useRef<HTMLDivElement>(null);
 
   const diceOptions = useMemo(
     () => [
-      { label: "D2", value: 2, key: "2" },
-      { label: "D3", value: 3, key: "3" },
-      { label: "D4", value: 4, key: "4" },
-      { label: "D6", value: 6, key: "6" },
-      { label: "D8", value: 8, key: "8" },
-      { label: "D10", value: 10, key: "10" },
-      { label: "D12", value: 12, key: "12" },
-      { label: "D20", value: 20, key: "20" },
+      ...PRESET_SIDES.map((sides) => ({
+        label: `D${sides}`,
+        value: sides,
+        key: String(sides),
+      })),
       { label: "Custom", value: "custom", key: "custom" },
     ],
     []
   );
 
-  const actualSides = useMemo(() => {
+  const plainSides = useMemo(() => {
     if (selectedDieKey === "custom") {
       return Math.max(2, customSidesInput);
     }
-    const selectedOption = diceOptions.find(
-      (opt) => opt.key === selectedDieKey
-    );
-    return selectedOption ? (selectedOption.value as number) : 6;
-  }, [selectedDieKey, customSidesInput, diceOptions]);
+    return parseInt(selectedDieKey, 10) || 6;
+  }, [selectedDieKey, customSidesInput]);
 
-  useEffect(() => {
-    setDecisions((prevDecisions) => {
-      const newArray = [...prevDecisions];
-      if (actualSides > newArray.length) {
-        return [...newArray, ...Array(actualSides - newArray.length).fill("")];
-      } else if (actualSides < newArray.length) {
-        return newArray.slice(0, actualSides);
-      }
-      return newArray;
-    });
+  const filledChoices = useMemo(
+    () => choices.filter((c) => c.text.trim() !== ""),
+    [choices]
+  );
+  const activeChoices = useMemo(
+    () => filledChoices.filter((c) => !c.struck),
+    [filledChoices]
+  );
+  // With two or more choices typed in, the die is sized to the choices.
+  const choiceMode = filledChoices.length >= 2;
+  const sides = choiceMode ? activeChoices.length : plainSides;
+
+  const clearOutcome = () => {
     setResult(null);
-    setAnimatedDieVisual(actualSides <= 6 && diceFaces[1] ? diceFaces[1] : "?");
-  }, [actualSides]);
+    setDecided(null);
+  };
+
+  // Keep the URL in sync so a refresh keeps the choices and the link is shareable.
+  useEffect(() => {
+    const params = new URLSearchParams();
+    filledChoices.forEach((c) => params.append("c", c.text.trim()));
+    if (filledChoices.length === 0 && plainSides !== 6) {
+      params.set("d", String(plainSides));
+    }
+    const query = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      query ? `?${query}` : window.location.pathname
+    );
+  }, [filledChoices, plainSides]);
 
   const handleDieTypeChange = (key: string) => {
     setSelectedDieKey(key);
+    clearOutcome();
   };
 
   const handleCustomSidesInputChange = (value: number | null) => {
+    clearOutcome();
     if (value === null) {
       setCustomSidesInput(2);
-      if (selectedDieKey !== "custom") setSelectedDieKey("custom");
       return;
     }
     if (value >= 2) {
-      const validValue = Math.min(value, MAX_CUSTOM_SIDES);
-      setCustomSidesInput(validValue);
-      if (selectedDieKey !== "custom") {
-        setSelectedDieKey("custom");
-      }
+      setCustomSidesInput(Math.min(value, MAX_CUSTOM_SIDES));
       if (value > MAX_CUSTOM_SIDES) {
         message.warning(
           `Maximum custom sides is ${MAX_CUSTOM_SIDES}. Input capped.`,
@@ -110,28 +178,26 @@ const DecisionMakerApp: React.FC = () => {
     }
   };
 
-  const rollDie = useCallback(() => {
+  // pool: the choices being rolled for, or null for a plain numbered die.
+  const rollDie = useCallback((pool: Choice[] | null, rollSides: number) => {
+    const visualElement = visualRef.current;
+    if (!visualElement || rollSides < 2) return;
+
     setIsRolling(true);
     setResult(null);
-
-    const visualElement = document.querySelector(".animated-dice-visual");
-    if (!visualElement) {
-      setIsRolling(false);
-      return;
-    }
+    setDecided(null);
 
     const totalFlashes = 15 + Math.floor(Math.random() * 10);
     const flashDuration = 0.075;
 
     const tl = gsap.timeline({
       onComplete: () => {
-        const finalRoll = Math.floor(Math.random() * actualSides) + 1;
-        setResult(finalRoll);
-        setAnimatedDieVisual(
-          actualSides <= 6 && diceFaces[finalRoll]
-            ? diceFaces[finalRoll]
-            : finalRoll
-        );
+        const finalRoll = Math.floor(Math.random() * rollSides) + 1;
+        setResult({
+          roll: finalRoll,
+          choiceId: pool ? pool[finalRoll - 1].id : undefined,
+        });
+        setAnimatedDieVisual(faceFor(finalRoll, rollSides));
         setIsRolling(false);
         gsap.fromTo(
           visualElement,
@@ -160,12 +226,8 @@ const DecisionMakerApp: React.FC = () => {
         rotation: `random(-30,30)deg`,
         ease: "power1.inOut",
         onStart: () => {
-          const randomFlashValue = Math.floor(Math.random() * actualSides) + 1;
-          setAnimatedDieVisual(
-            actualSides <= 6 && diceFaces[randomFlashValue]
-              ? diceFaces[randomFlashValue]
-              : randomFlashValue
-          );
+          const randomFlashValue = Math.floor(Math.random() * rollSides) + 1;
+          setAnimatedDieVisual(faceFor(randomFlashValue, rollSides));
         },
       });
     }
@@ -176,13 +238,94 @@ const DecisionMakerApp: React.FC = () => {
       duration: 0.3,
       ease: "power1.out",
     });
-  }, [actualSides]);
+  }, []);
 
-  const handleDecisionChange = (index: number, value: string) => {
-    const newDecisions = [...decisions];
-    newDecisions[index] = value;
-    setDecisions(newDecisions);
+  const handleRollClick = () => {
+    rollDie(choiceMode ? activeChoices : null, sides);
   };
+
+  const handleRelieved = () => setDecided("relieved");
+
+  // Strike the option the user didn't want, then roll again for the rest.
+  const handleBummed = () => {
+    if (!result || result.choiceId === undefined) return;
+    const struckId = result.choiceId;
+    const remaining = activeChoices.filter((c) => c.id !== struckId);
+    setChoices((prev) =>
+      prev.map((c) => (c.id === struckId ? { ...c, struck: true } : c))
+    );
+    if (remaining.length === 1) {
+      setResult({ roll: 1, choiceId: remaining[0].id });
+      setDecided("last");
+      setAnimatedDieVisual("✓");
+    } else {
+      rollDie(remaining, remaining.length);
+    }
+  };
+
+  const handleStartOver = () => {
+    setChoices((prev) => prev.map((c) => ({ ...c, struck: false })));
+    clearOutcome();
+  };
+
+  const handleChoiceChange = (id: number, value: string) => {
+    setChoices((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, text: value } : c))
+    );
+    clearOutcome();
+  };
+
+  const addChoice = () => {
+    if (choices.length >= MAX_CHOICES) {
+      message.warning(`Maximum of ${MAX_CHOICES} choices.`, 3);
+      return;
+    }
+    const choice = makeChoice();
+    setChoices((prev) => [...prev, choice]);
+    setFocusId(choice.id);
+  };
+
+  const removeChoice = (id: number) => {
+    setChoices((prev) =>
+      prev.length > MIN_CHOICE_ROWS
+        ? prev.filter((c) => c.id !== id)
+        : prev.map((c) => (c.id === id ? { ...c, text: "", struck: false } : c))
+    );
+    clearOutcome();
+  };
+
+  const restoreChoice = (id: number) => {
+    setChoices((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, struck: false } : c))
+    );
+    clearOutcome();
+  };
+
+  const handleChoiceEnter = (index: number) => {
+    if (index === choices.length - 1) {
+      addChoice();
+    } else {
+      setFocusId(choices[index + 1].id);
+    }
+  };
+
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      message.success("Link copied. Send it to someone indecisive.", 3);
+    } catch {
+      message.error("Couldn't copy. Grab the link from the address bar.", 4);
+    }
+  };
+
+  const resultChoice =
+    result && result.choiceId !== undefined
+      ? choices.find((c) => c.id === result.choiceId)
+      : undefined;
+  const hasStruck = choices.some((c) => c.struck);
+  const idleVisual = sides <= 6 ? diceFaces[1] : "?";
+  const dieVisual =
+    !isRolling && result === null ? idleVisual : animatedDieVisual;
 
   return (
     <div className="app-container">
@@ -200,38 +343,49 @@ const DecisionMakerApp: React.FC = () => {
               className="config-card"
             >
               <Space wrap size="middle" align="end" style={{ rowGap: "16px" }}>
-                {" "}
-                {/* Added rowGap */}
-                <Space direction="vertical">
-                  <Text strong>Dice Type:</Text>
-                  <Select
-                    value={selectedDieKey}
-                    onChange={handleDieTypeChange}
-                    style={{ width: 150 }}
-                    className="dice-select"
-                    size="large"
-                  >
-                    {diceOptions.map((opt) => (
-                      <Option key={opt.key} value={opt.key}>
-                        {opt.label}
-                      </Option>
-                    ))}
-                  </Select>
-                </Space>
-                {selectedDieKey === "custom" && (
-                  <Space direction="vertical">
-                    <Text strong>Custom Sides (2-{MAX_CUSTOM_SIDES}):</Text>
-                    <InputNumber
-                      min={2}
-                      max={MAX_CUSTOM_SIDES}
-                      value={customSidesInput}
-                      onChange={handleCustomSidesInputChange}
-                      placeholder="Sides"
-                      style={{ width: 150 }}
-                      size="large"
-                      disabled={isRolling}
-                    />
-                  </Space>
+                {choiceMode ? (
+                  <Text className="auto-die-text">
+                    Your die has{" "}
+                    <Text strong>
+                      {sides} {sides === 1 ? "side" : "sides"}
+                    </Text>
+                    , one per choice.
+                  </Text>
+                ) : (
+                  <>
+                    <Space direction="vertical">
+                      <Text strong>No choices? Roll a number:</Text>
+                      <Select
+                        value={selectedDieKey}
+                        onChange={handleDieTypeChange}
+                        style={{ width: 150 }}
+                        className="dice-select"
+                        size="large"
+                        disabled={isRolling}
+                      >
+                        {diceOptions.map((opt) => (
+                          <Option key={opt.key} value={opt.key}>
+                            {opt.label}
+                          </Option>
+                        ))}
+                      </Select>
+                    </Space>
+                    {selectedDieKey === "custom" && (
+                      <Space direction="vertical">
+                        <Text strong>Custom Sides (2-{MAX_CUSTOM_SIDES}):</Text>
+                        <InputNumber
+                          min={2}
+                          max={MAX_CUSTOM_SIDES}
+                          value={customSidesInput}
+                          onChange={handleCustomSidesInputChange}
+                          placeholder="Sides"
+                          style={{ width: 150 }}
+                          size="large"
+                          disabled={isRolling}
+                        />
+                      </Space>
+                    )}
+                  </>
                 )}
                 <Tooltip title="How random results can help">
                   <Button
@@ -241,6 +395,7 @@ const DecisionMakerApp: React.FC = () => {
                     shape="circle"
                     size="large"
                     className="info-button-custom"
+                    aria-label="How random results can help"
                   />
                 </Tooltip>
               </Space>
@@ -248,86 +403,203 @@ const DecisionMakerApp: React.FC = () => {
 
             <div className="roll-section">
               <div className="animated-dice-container">
-                <div className="animated-dice-visual">{animatedDieVisual}</div>
+                <div className="animated-dice-visual" ref={visualRef}>
+                  {dieVisual}
+                </div>
               </div>
-              <Button
-                type="primary"
-                onClick={rollDie}
-                disabled={isRolling}
-                loading={isRolling}
-                className="roll-button"
-                size="large"
-                icon={<CheckCircleOutlined />}
-              >
-                {isRolling ? "Rolling..." : `Roll D${actualSides}!`}
-              </Button>
+              {decided ? (
+                <Button
+                  onClick={handleStartOver}
+                  className="roll-button"
+                  size="large"
+                  icon={<ReloadOutlined />}
+                >
+                  Start over
+                </Button>
+              ) : (
+                <Button
+                  type="primary"
+                  onClick={handleRollClick}
+                  disabled={isRolling}
+                  loading={isRolling}
+                  className="roll-button"
+                  size="large"
+                  icon={<CheckCircleOutlined />}
+                >
+                  {isRolling
+                    ? "Rolling..."
+                    : choiceMode
+                    ? "Roll for it!"
+                    : `Roll D${sides}!`}
+                </Button>
+              )}
 
-              {result !== null && (
+              {result !== null && !resultChoice && (
                 <Card className="result-card" variant="borderless">
-                  <Title
-                    level={4}
-                    style={{ marginBottom: 5, color: "#1890ff" }}
-                  >
+                  <Title level={4} className="result-title">
                     Outcome:
                   </Title>
                   <Paragraph className="result-number">
                     You rolled a{" "}
                     <Text strong style={{ fontSize: "1.5em" }}>
-                      {result}
+                      {result.roll}
                     </Text>
                   </Paragraph>
-                  {decisions[result - 1] &&
-                    decisions[result - 1].trim() !== "" && (
-                      <Paragraph className="result-decision-text">
-                        <Text strong>Your Decided Choice:</Text>{" "}
-                        <Text
-                          keyboard
-                          style={{ padding: "3px 7px", fontSize: "1.1em" }}
-                        >
-                          {decisions[result - 1]}
-                        </Text>
+                </Card>
+              )}
+
+              {result !== null && resultChoice && (
+                <Card className="result-card" variant="borderless">
+                  <Title level={4} className="result-title">
+                    {decided === "relieved"
+                      ? "Decided:"
+                      : decided === "last"
+                      ? "That leaves:"
+                      : "The die says:"}
+                  </Title>
+                  <Paragraph className="result-choice">
+                    {resultChoice.text.trim()}
+                  </Paragraph>
+                  {decided === null && (
+                    <>
+                      <Paragraph className="gut-check-prompt">
+                        Gut check. How does that feel?
                       </Paragraph>
-                    )}
+                      <Space wrap style={{ justifyContent: "center" }}>
+                        <Button
+                          type="primary"
+                          size="large"
+                          icon={<SmileOutlined />}
+                          onClick={handleRelieved}
+                        >
+                          Relieved
+                        </Button>
+                        <Button
+                          size="large"
+                          icon={<FrownOutlined />}
+                          onClick={handleBummed}
+                        >
+                          Bummed
+                        </Button>
+                      </Space>
+                      <Paragraph type="secondary" className="gut-check-hint">
+                        Bummed crosses it off and rolls again.
+                      </Paragraph>
+                    </>
+                  )}
+                  {decided === "relieved" && (
+                    <Paragraph className="gut-check-prompt">
+                      Your gut agrees. Go do it.
+                    </Paragraph>
+                  )}
+                  {decided === "last" && (
+                    <Paragraph className="gut-check-prompt">
+                      You crossed off everything else. Sounds like you knew all
+                      along.
+                    </Paragraph>
+                  )}
                 </Card>
               )}
             </div>
           </div>
 
           <div className="grid-column-choices">
-            {actualSides > 0 && (
-              <Card
-                title="Define Your Choices (Optional)"
-                variant="borderless"
-                styles={{ header: { borderBottom: "none", paddingBottom: 0 } }}
-                className="choices-card"
+            <Card
+              title="What are you deciding between?"
+              variant="borderless"
+              styles={{ header: { borderBottom: "none", paddingBottom: 0 } }}
+              className="choices-card"
+            >
+              <Paragraph
+                type="secondary"
+                style={{ marginTop: -10, marginBottom: 15 }}
               >
-                <Paragraph
-                  type="secondary"
-                  style={{ marginTop: -10, marginBottom: 15 }}
-                >
-                  Enter up to {actualSides} choices.
-                </Paragraph>
-                <div className="choices-list-container">
-                  {decisions.map((decision, index) => (
-                    <Input
-                      key={index}
-                      value={decision}
-                      onChange={(e) =>
-                        handleDecisionChange(index, e.target.value)
-                      }
-                      placeholder={`Choice ${index + 1}`}
-                      disabled={isRolling}
-                      className="choice-input"
-                      prefix={
-                        <AppstoreAddOutlined
-                          style={{ color: "rgba(0,0,0,0.25)" }}
+                {filledChoices.length === 1
+                  ? "Add one more and the die will roll for them."
+                  : "Type your options. The die sizes itself to match."}
+              </Paragraph>
+              <div className="choices-list-container">
+                {choices.map((choice, index) => {
+                  const side = activeChoices.indexOf(choice) + 1;
+                  return (
+                    <div className="choice-row" key={choice.id}>
+                      <Input
+                        value={choice.text}
+                        onChange={(e) =>
+                          handleChoiceChange(choice.id, e.target.value)
+                        }
+                        onPressEnter={() => handleChoiceEnter(index)}
+                        placeholder={`Choice ${index + 1}`}
+                        aria-label={`Choice ${index + 1}`}
+                        maxLength={MAX_CHOICE_LENGTH}
+                        disabled={isRolling || choice.struck}
+                        ref={(input) => {
+                          if (input && choice.id === focusId) {
+                            input.focus();
+                            setFocusId(null);
+                          }
+                        }}
+                        className={
+                          choice.struck
+                            ? "choice-input choice-struck"
+                            : "choice-input"
+                        }
+                        prefix={
+                          <span className="choice-side">
+                            {choiceMode && side > 0 ? side : "–"}
+                          </span>
+                        }
+                      />
+                      {choice.struck ? (
+                        <Tooltip title="Put it back">
+                          <Button
+                            type="text"
+                            icon={<UndoOutlined />}
+                            onClick={() => restoreChoice(choice.id)}
+                            disabled={isRolling}
+                            aria-label={`Restore choice ${index + 1}`}
+                          />
+                        </Tooltip>
+                      ) : (
+                        <Button
+                          type="text"
+                          icon={<CloseOutlined />}
+                          onClick={() => removeChoice(choice.id)}
+                          disabled={isRolling}
+                          aria-label={`Remove choice ${index + 1}`}
                         />
-                      }
-                    />
-                  ))}
-                </div>
-              </Card>
-            )}
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <Space wrap className="choices-actions">
+                <Button
+                  icon={<PlusOutlined />}
+                  onClick={addChoice}
+                  disabled={isRolling}
+                >
+                  Add choice
+                </Button>
+                <Button
+                  icon={<LinkOutlined />}
+                  onClick={handleCopyLink}
+                  disabled={filledChoices.length === 0}
+                >
+                  Copy link
+                </Button>
+                {hasStruck && !decided && (
+                  <Button
+                    type="text"
+                    icon={<ReloadOutlined />}
+                    onClick={handleStartOver}
+                    disabled={isRolling}
+                  >
+                    Put all back
+                  </Button>
+                )}
+              </Space>
+            </Card>
           </div>
         </div>
       </Card>
@@ -369,8 +641,9 @@ const DecisionMakerApp: React.FC = () => {
         <Paragraph>
           This process doesn't make the decision *for* you, but rather
           illuminates your genuine feelings, helping you bypass overthinking and
-          connect with your intuitive desires. Use this insight to make a more
-          confident final choice!
+          connect with your intuitive desires. That's what the gut check after
+          each roll is for: tell it you're bummed and it crosses that option
+          off and rolls again.
         </Paragraph>
       </Modal>
     </div>
